@@ -58,6 +58,7 @@ app.all('/api/mls/*', requireBearerAuth, async (req, res) => {
     'Referer':                   `${UPSTREAM_BASE_URL}/`,
     'Origin':                    UPSTREAM_BASE_URL,
     'Connection':                'keep-alive',
+    'Authorization':             req.headers['authorization'], // Forward the bearer token
   };
 
   // Forward Content-Type for POST/PUT/PATCH
