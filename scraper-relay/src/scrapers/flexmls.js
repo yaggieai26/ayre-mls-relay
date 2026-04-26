@@ -160,50 +160,113 @@ async function scrapeFlexMls({ url, sbrWsEndpoint, timeoutMs = 90_000 }) {
       // ---- spec block (beds / baths / sqft / lot / year) ------------------
       const specs = {};
       const bodyText = document.body ? document.body.innerText : '';
-      const grab = (re) => {
-        const m = bodyText.match(re);
-        return m ? m[1] : null;
-      };
-      specs.beds = cleanNum(grab(/(\d+(?:\.\d+)?)\s*(?:bd|bed|beds|bedrooms?)/i));
-      specs.baths = cleanNum(
-        grab(/(\d+(?:\.\d+)?)\s*(?:ba|bath|baths|bathrooms?)/i)
-      );
-      specs.sqft = cleanNum(
-        grab(/([\d,]+)\s*(?:sq\s?ft|square\s?feet|sqft)/i)
-      );
-      specs.lot_sqft = cleanNum(
-        grab(/lot[^0-9]{0,15}([\d,]+)\s*sq\s?ft/i)
-      );
-      specs.lot_acres = cleanNum(grab(/([\d.]+)\s*acres?/i));
-      specs.year_built = cleanNum(grab(/year\s*built[^0-9]{0,5}(\d{4})/i));
 
-      // ---- photos ---------------------------------------------------------
-      const photoSet = new Set();
-      document.querySelectorAll('img').forEach((img) => {
-        const src =
-          img.getAttribute('src') ||
-          img.getAttribute('data-src') ||
-          img.getAttribute('data-lazy') ||
-          '';
-        if (
-          src &&
-          /^https?:\/\//.test(src) &&
-          !/sprite|icon|logo|placeholder/i.test(src) &&
-          (img.naturalWidth >= 400 ||
-            img.width >= 400 ||
-            /listing|photo|media|cdn/i.test(src))
-        ) {
-          photoSet.add(src);
+      /**
+       * grabSpec: find the FIRST match of a regex in bodyText, return capture group 1.
+       * Validates the result is within [min, max] to reject false positives.
+       */
+      const grabSpec = (re, min, max) => {
+        const m = bodyText.match(re);
+        if (!m) return null;
+        const n = cleanNum(m[1]);
+        if (n === null) return null;
+        if (min !== undefined && n < min) return null;
+        if (max !== undefined && n > max) return null;
+        return n;
+      };
+
+      // Beds: require the number to be a standalone integer (word boundary on
+      // both sides) and cap at 20 to avoid zip codes / sqft bleeding in.
+      // Pattern: "<number> bed(s)/bedroom(s)" OR "Bedrooms <number>"
+      specs.beds =
+        grabSpec(/\b([1-9]\d?)\s*(?:bd|bed|beds|bedrooms?)\b/i, 1, 20) ||
+        grabSpec(/\bbedrooms?\s*[:\-]?\s*([1-9]\d?)\b/i, 1, 20) ||
+        null;
+
+      // Baths: same approach, cap at 20.
+      specs.baths =
+        grabSpec(/\b(\d+(?:\.\d+)?)\s*(?:ba|bath|baths|bathrooms?)\b/i, 0.5, 20) ||
+        grabSpec(/\bbaths?\s*(?:total\s*)?[:\-]?\s*(\d+(?:\.\d+)?)\b/i, 0.5, 20) ||
+        null;
+
+      // Sqft: FlexMLS renders sqft in several formats. Try DOM selectors first,
+      // then fall back to text patterns. Cap at 99,999 to exclude lot sizes.
+      const sqftFromDom = (() => {
+        // FlexMLS "Total SqFt" label pattern: a <dt> or label containing
+        // "sqft" / "sq ft" / "square" followed by a sibling <dd> or span.
+        const allEls = Array.from(document.querySelectorAll('dt, th, label, [class*="label" i], [class*="field-name" i]'));
+        for (const el of allEls) {
+          if (/sq\s?ft|square\s?f|total\s+sq/i.test(text(el))) {
+            // Try next sibling, parent's next sibling, or adjacent dd/td
+            const candidates = [
+              el.nextElementSibling,
+              el.parentElement && el.parentElement.nextElementSibling,
+              el.closest('tr') && el.closest('tr').querySelector('td:last-child'),
+            ];
+            for (const c of candidates) {
+              const n = cleanNum(text(c));
+              if (n && n >= 100 && n <= 99999) return n;
+            }
+          }
         }
-      });
-      // og:image as a fallback
+        // Also check any element whose text is purely a number adjacent to a
+        // "sqft" label in the summary bar (FlexMLS uses a stat bar pattern).
+        const statEls = Array.from(document.querySelectorAll('[class*="stat" i], [class*="detail" i], [class*="spec" i]'));
+        for (const el of statEls) {
+          const t = text(el);
+          const m = t.match(/(\d[\d,]*)\s*(?:sq\s?ft|sqft|square\s?f)/i);
+          if (m) {
+            const n = cleanNum(m[1]);
+            if (n && n >= 100 && n <= 99999) return n;
+          }
+        }
+        return null;
+      })();
+
+      specs.sqft =
+        sqftFromDom ||
+        grabSpec(/([\d,]+)\s*(?:sq\s?ft|square\s?feet|sqft)\b/i, 100, 99999) ||
+        // FlexMLS sometimes writes "1,234 Total SqFt"
+        grabSpec(/([\d,]+)\s*total\s*sq\s?ft/i, 100, 99999) ||
+        null;
+
+      specs.lot_sqft = grabSpec(/lot[^0-9]{0,15}([\d,]+)\s*sq\s?ft/i, 1, 9_999_999) || null;
+      specs.lot_acres = grabSpec(/([\d.]+)\s*acres?\b/i, 0.01, 9999) || null;
+      specs.year_built = grabSpec(/year\s*built[^0-9]{0,5}(\d{4})/i, 1800, 2100) || null;
+
+      // ---- primary photo only ---------------------------------------------
+      // Prefer og:image (always the hero/primary photo on FlexMLS).
+      // Fall back to the first qualifying <img> if og:image is absent.
       const ogImg = metaProp('og:image');
-      if (ogImg) photoSet.add(ogImg);
-      const photos = Array.from(photoSet).slice(0, 60);
+      let primaryPhoto = ogImg || null;
+
+      if (!primaryPhoto) {
+        const imgs = Array.from(document.querySelectorAll('img'));
+        for (const img of imgs) {
+          const src =
+            img.getAttribute('src') ||
+            img.getAttribute('data-src') ||
+            img.getAttribute('data-lazy') ||
+            '';
+          if (
+            src &&
+            /^https?:\/\//.test(src) &&
+            !/sprite|icon|logo|placeholder|avatar|map/i.test(src) &&
+            (img.naturalWidth >= 400 || img.width >= 400 || /media|listing|photo/i.test(src))
+          ) {
+            primaryPhoto = src;
+            break;
+          }
+        }
+      }
 
       // ---- MLS ID ---------------------------------------------------------
       const mlsId =
-        grab(/MLS\s*#?\s*[:\-]?\s*([A-Z0-9\-]{4,})/i) ||
+        (() => {
+          // FlexMLS shows "#XXXXXXX" in the address block
+          const m = bodyText.match(/#(\d{6,8})\b/);
+          return m ? m[1] : null;
+        })() ||
         (productLd && productLd.sku) ||
         null;
 
@@ -216,7 +279,7 @@ async function scrapeFlexMls({ url, sbrWsEndpoint, timeoutMs = 90_000 }) {
         description,
         mls_id: mlsId,
         specs,
-        photos,
+        photo: primaryPhoto,   // single primary photo
         og_image: ogImg,
         ld_json: productLd,
       };
