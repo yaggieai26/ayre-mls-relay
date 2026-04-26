@@ -1,0 +1,19 @@
+{
+  "name": "ayre-scraper-relay",
+  "version": "1.0.0",
+  "description": "Scraping relay service that proxies Bright Data Scraping Browser (SBR) requests for FlexMLS listings.",
+  "main": "src/server.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node src/server.js"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "morgan": "^1.10.0",
+    "playwright-core": "^1.47.2"
+  }
+}
