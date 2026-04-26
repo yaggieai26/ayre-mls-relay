@@ -1,11 +1,10 @@
 {
   "name": "ayre-mls-relay",
-  "version": "1.0.0",
-  "description": "Lightweight MLS API relay proxy for Andrew Yaggie Real Estate",
+  "version": "1.0.1",
+  "description": "MLS API relay proxy \u2014 no relay-level auth",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js",
-    "dev": "node server.js"
+    "start": "node server.js"
   },
   "dependencies": {
     "express": "^4.18.2",
