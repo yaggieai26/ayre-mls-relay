@@ -2,6 +2,7 @@
 
 const express = require('express');
 const morgan = require('morgan');
+const https = require('https');
 const { scrapeFlexMls } = require('./scrapers/flexmls');
 
 const app = express();
@@ -33,8 +34,8 @@ app.get('/', (_req, res) => {
   res.json({
     ok: true,
     service: 'ayre-scraper-relay',
-    version: '1.0.0',
-    endpoints: ['/health', '/whoami', 'POST /scrape/flexmls'],
+    version: '1.0.1',
+    endpoints: ['/health', '/whoami', '/diag/sbr', 'POST /scrape/flexmls'],
   });
 });
 
@@ -58,6 +59,61 @@ app.get('/whoami', async (_req, res) => {
   } catch (err) {
     res.status(500).json({ ok: false, error: String(err && err.message) });
   }
+});
+
+// Diagnostic: test raw HTTPS/WebSocket connectivity to Bright Data SBR.
+// Reports the HTTP status code and response body from brd.superproxy.io:9222.
+// 101 = WebSocket upgrade accepted (whitelist OK).
+// 407 ip_forbidden = IP not whitelisted.
+app.get('/diag/sbr', async (_req, res) => {
+  // Parse wss:// -> host, port, auth
+  const wsUrl = SBR_WS_ENDPOINT;
+  const match = wsUrl.match(/^wss?:\/\/([^@]+)@([^:/]+):?(\d+)?/);
+  if (!match) {
+    return res.status(500).json({ ok: false, error: 'Cannot parse SBR_WS_ENDPOINT' });
+  }
+  const auth = match[1];
+  const hostname = match[2];
+  const port = parseInt(match[3] || '9222', 10);
+
+  const result = await new Promise((resolve) => {
+    const options = {
+      hostname,
+      port,
+      path: '/',
+      method: 'GET',
+      auth,
+      headers: {
+        'Upgrade': 'websocket',
+        'Connection': 'Upgrade',
+        'Sec-WebSocket-Key': Buffer.from('diag-test-key-00').toString('base64'),
+        'Sec-WebSocket-Version': '13',
+        'Host': `${hostname}:${port}`,
+      },
+      rejectUnauthorized: false,
+    };
+    const req = https.request(options, (r) => {
+      let body = '';
+      r.on('data', (d) => { body += d; });
+      r.on('end', () => resolve({ statusCode: r.statusCode, body: body.trim(), headers: r.headers }));
+    });
+    req.on('error', (e) => resolve({ statusCode: null, body: null, error: e.message }));
+    req.setTimeout(15000, () => { req.destroy(); resolve({ statusCode: null, body: null, error: 'timeout' }); });
+    req.end();
+  });
+
+  const connected = result.statusCode === 101;
+  res.json({
+    ok: connected,
+    sbr_status_code: result.statusCode,
+    sbr_response: result.body,
+    error: result.error || null,
+    interpretation: connected
+      ? 'WebSocket upgrade accepted — IP is whitelisted ✓'
+      : result.body && result.body.includes('ip_forbidden')
+        ? 'IP is NOT whitelisted in Bright Data (ip_forbidden)'
+        : `Unexpected response: ${result.statusCode} ${result.body}`,
+  });
 });
 
 // --- Authenticated routes ----------------------------------------------------
