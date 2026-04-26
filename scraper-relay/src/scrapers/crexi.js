@@ -70,7 +70,7 @@ async function scrapeCrexi({ email, password, sbrWsEndpoint, timeoutMs = 120_000
         }
       } catch (_) {}
     }
-    if (!emailFilled) throw new Error('Could not find email input on Crexi login page');
+    if (!emailFilled) const title = await page.title(); const html = await page.content(); throw new Error(`Could not find email input on Crexi login page. Title: ${title}. HTML snippet: ${html.slice(0, 500)}`);
 
     // Password field
     const passwordSelectors = [
