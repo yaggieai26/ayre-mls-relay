@@ -189,15 +189,43 @@ async function scrapeFlexMls({ url, sbrWsEndpoint, timeoutMs = 90_000 }) {
         grabSpec(/\bbaths?\s*(?:total\s*)?[:\-]?\s*(\d+(?:\.\d+)?)\b/i, 0.5, 20) ||
         null;
 
-      // Sqft: FlexMLS renders sqft in several formats. Try DOM selectors first,
-      // then fall back to text patterns. Cap at 99,999 to exclude lot sizes.
-      const sqftFromDom = (() => {
-        // FlexMLS "Total SqFt" label pattern: a <dt> or label containing
-        // "sqft" / "sq ft" / "square" followed by a sibling <dd> or span.
-        const allEls = Array.from(document.querySelectorAll('dt, th, label, [class*="label" i], [class*="field-name" i]'));
+      // Sqft: FlexMLS always shows total sqft in the listing header summary bar
+      // as "X,XXX SF" (e.g. "2 beds  2 baths  1,408 SF"). This is the most
+      // reliable source and avoids Foundation/sub-floor fields in the details
+      // section that can have their own numeric values.
+      //
+      // Priority order:
+      //   1. Header summary bar: "1,408 SF" pattern (space + uppercase SF)
+      //   2. Labeled field: "Total Finished Sqft" or "Main Floor Total SqFt"
+      //      (skip any field whose label contains "foundation")
+      //   3. Generic sqft pattern as last resort
+
+      const sqftFromHeader = (() => {
+        // The header bar text is something like:
+        //   "2 beds  2 baths  1,408 SF  #7059633  New Listing"
+        // Match a number immediately followed by " SF" (space + SF, word boundary).
+        // Use grabSpec with a tight range to avoid false positives.
+        const m = bodyText.match(/\b([\d,]+)\s+SF\b/);
+        if (m) {
+          const n = cleanNum(m[1]);
+          if (n && n >= 100 && n <= 99999) return n;
+        }
+        return null;
+      })();
+
+      const sqftFromDetails = (() => {
+        // Walk labeled field pairs in the Listing Details section.
+        // Accept labels that mention "total" sqft / finished sqft.
+        // Explicitly SKIP any label that mentions "foundation".
+        const allEls = Array.from(
+          document.querySelectorAll('dt, th, label, [class*="label" i], [class*="field-name" i], h1, h2, h3, h4')
+        );
         for (const el of allEls) {
-          if (/sq\s?ft|square\s?f|total\s+sq/i.test(text(el))) {
-            // Try next sibling, parent's next sibling, or adjacent dd/td
+          const labelText = text(el);
+          // Skip foundation-related labels entirely
+          if (/foundation/i.test(labelText)) continue;
+          // Only match labels that clearly indicate total/finished sqft
+          if (/total\s*(finished\s*)?sq|main\s*floor.*sq|finished.*sq|above.*grd.*sq/i.test(labelText)) {
             const candidates = [
               el.nextElementSibling,
               el.parentElement && el.parentElement.nextElementSibling,
@@ -209,25 +237,23 @@ async function scrapeFlexMls({ url, sbrWsEndpoint, timeoutMs = 90_000 }) {
             }
           }
         }
-        // Also check any element whose text is purely a number adjacent to a
-        // "sqft" label in the summary bar (FlexMLS uses a stat bar pattern).
-        const statEls = Array.from(document.querySelectorAll('[class*="stat" i], [class*="detail" i], [class*="spec" i]'));
-        for (const el of statEls) {
-          const t = text(el);
-          const m = t.match(/(\d[\d,]*)\s*(?:sq\s?ft|sqft|square\s?f)/i);
-          if (m) {
-            const n = cleanNum(m[1]);
-            if (n && n >= 100 && n <= 99999) return n;
-          }
-        }
         return null;
       })();
 
       specs.sqft =
-        sqftFromDom ||
-        grabSpec(/([\d,]+)\s*(?:sq\s?ft|square\s?feet|sqft)\b/i, 100, 99999) ||
-        // FlexMLS sometimes writes "1,234 Total SqFt"
-        grabSpec(/([\d,]+)\s*total\s*sq\s?ft/i, 100, 99999) ||
+        sqftFromHeader ||
+        sqftFromDetails ||
+        // Last resort: generic "X,XXX sq ft" pattern — but only if it doesn't
+        // appear within 60 chars of the word "foundation"
+        (() => {
+          const m = bodyText.match(/([\d,]+)\s*(?:sq\s?ft|square\s?feet|sqft)\b/i);
+          if (!m) return null;
+          const idx = m.index;
+          const surrounding = bodyText.slice(Math.max(0, idx - 60), idx + 60);
+          if (/foundation/i.test(surrounding)) return null;
+          const n = cleanNum(m[1]);
+          return (n && n >= 100 && n <= 99999) ? n : null;
+        })() ||
         null;
 
       specs.lot_sqft = grabSpec(/lot[^0-9]{0,15}([\d,]+)\s*sq\s?ft/i, 1, 9_999_999) || null;
