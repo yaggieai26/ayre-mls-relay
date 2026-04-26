@@ -16,7 +16,12 @@ const SBR_WS_ENDPOINT =
   process.env.SBR_WS_ENDPOINT ||
   'wss://brd-customer-hl_ebc27cb0-zone-crexi:m6yo5yksj0py@brd.superproxy.io:9222';
 
-app.use(express.json({ limit: '1mb' }));
+// Bright Data Web Unlocker API credentials (for /scrape/url)
+const BD_API_KEY = process.env.BRIGHTDATA_API_KEY || '';
+const BD_API_URL = process.env.BRIGHTDATA_API_URL || 'https://api.brightdata.com/request';
+const BD_ZONE = process.env.BRIGHTDATA_ZONE || 'web_unlocker1';
+
+app.use(express.json({ limit: '2mb' }));
 app.use(morgan('tiny'));
 
 // --- Auth middleware ---------------------------------------------------------
@@ -34,8 +39,14 @@ app.get('/', (_req, res) => {
   res.json({
     ok: true,
     service: 'ayre-scraper-relay',
-    version: '1.0.1',
-    endpoints: ['/health', '/whoami', '/diag/sbr', 'POST /scrape/flexmls'],
+    version: '1.1.0',
+    endpoints: [
+      '/health',
+      '/whoami',
+      '/diag/sbr',
+      'POST /scrape/flexmls',
+      'POST /scrape/url',
+    ],
   });
 });
 
@@ -45,6 +56,7 @@ app.get('/health', (_req, res) => {
     status: 'healthy',
     uptime_s: Math.round(process.uptime()),
     sbr_configured: Boolean(SBR_WS_ENDPOINT),
+    bd_api_configured: Boolean(BD_API_KEY),
     timestamp: new Date().toISOString(),
   });
 });
@@ -62,11 +74,7 @@ app.get('/whoami', async (_req, res) => {
 });
 
 // Diagnostic: test raw HTTPS/WebSocket connectivity to Bright Data SBR.
-// Reports the HTTP status code and response body from brd.superproxy.io:9222.
-// 101 = WebSocket upgrade accepted (whitelist OK).
-// 407 ip_forbidden = IP not whitelisted.
 app.get('/diag/sbr', async (_req, res) => {
-  // Parse wss:// -> host, port, auth
   const wsUrl = SBR_WS_ENDPOINT;
   const match = wsUrl.match(/^wss?:\/\/([^@]+)@([^:/]+):?(\d+)?/);
   if (!match) {
@@ -117,6 +125,8 @@ app.get('/diag/sbr', async (_req, res) => {
 });
 
 // --- Authenticated routes ----------------------------------------------------
+
+// POST /scrape/flexmls — Scrape a FlexMLS listing via SBR (Playwright CDP)
 app.post('/scrape/flexmls', requireBearer, async (req, res) => {
   const { url, timeout_ms } = req.body || {};
   if (!url || typeof url !== 'string') {
@@ -145,6 +155,137 @@ app.post('/scrape/flexmls', requireBearer, async (req, res) => {
   }
 });
 
+// POST /scrape/url — Generic URL fetch via Bright Data Web Unlocker API
+//
+// Accepts: { url: string, timeout_ms?: number }
+// Returns: { ok: true, html: string, status: number, duration_ms: number }
+//
+// This endpoint uses Bright Data's Web Unlocker API (HTTP-based, no browser)
+// to fetch any URL with anti-bot bypass. It's faster and cheaper than SBR.
+// Falls back to SBR (real headless Chrome) if Web Unlocker fails or returns
+// a page with insufficient content.
+app.post('/scrape/url', requireBearer, async (req, res) => {
+  const { url, timeout_ms } = req.body || {};
+  if (!url || typeof url !== 'string') {
+    return res
+      .status(400)
+      .json({ ok: false, error: 'missing or invalid "url" in body' });
+  }
+
+  const timeout = Number(timeout_ms) > 0 ? Number(timeout_ms) : 90000;
+  const started = Date.now();
+
+  // Strategy 1: Try Bright Data Web Unlocker API (fast, cheap)
+  if (BD_API_KEY) {
+    try {
+      console.log(`[scrape/url] Trying Web Unlocker for: ${url}`);
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), timeout);
+
+      const bdResp = await fetch(BD_API_URL, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${BD_API_KEY}`,
+        },
+        body: JSON.stringify({
+          zone: BD_ZONE,
+          url,
+          format: 'raw',
+        }),
+        signal: controller.signal,
+      });
+
+      clearTimeout(timer);
+      const html = await bdResp.text();
+
+      if (bdResp.status === 200 && html.length > 500) {
+        console.log(`[scrape/url] Web Unlocker success: ${url} (${html.length} bytes, ${Date.now() - started}ms)`);
+        return res.json({
+          ok: true,
+          html,
+          status: 200,
+          method: 'web_unlocker',
+          duration_ms: Date.now() - started,
+        });
+      }
+
+      console.warn(`[scrape/url] Web Unlocker returned ${bdResp.status} (${html.length} bytes) for ${url}`);
+    } catch (err) {
+      console.warn(`[scrape/url] Web Unlocker failed for ${url}: ${err.message}`);
+    }
+  } else {
+    console.log('[scrape/url] No BRIGHTDATA_API_KEY configured, skipping Web Unlocker');
+  }
+
+  // Strategy 2: Fall back to SBR (real headless Chrome via Playwright CDP)
+  if (SBR_WS_ENDPOINT) {
+    try {
+      console.log(`[scrape/url] Falling back to SBR for: ${url}`);
+      const html = await fetchViaSBR(url, timeout);
+
+      if (html && html.length > 500) {
+        console.log(`[scrape/url] SBR success: ${url} (${html.length} bytes, ${Date.now() - started}ms)`);
+        return res.json({
+          ok: true,
+          html,
+          status: 200,
+          method: 'sbr',
+          duration_ms: Date.now() - started,
+        });
+      }
+
+      console.warn(`[scrape/url] SBR returned insufficient content for ${url} (${html ? html.length : 0} bytes)`);
+    } catch (err) {
+      console.error(`[scrape/url] SBR failed for ${url}: ${err.message}`);
+    }
+  }
+
+  // Both strategies failed
+  return res.status(502).json({
+    ok: false,
+    error: 'Both Web Unlocker and SBR failed to fetch the URL',
+    html: '',
+    status: 0,
+    duration_ms: Date.now() - started,
+  });
+});
+
+/**
+ * Fetch a URL using Bright Data Scraping Browser (SBR) via Playwright CDP.
+ * Returns the full page HTML after rendering JavaScript.
+ */
+async function fetchViaSBR(url, timeoutMs) {
+  const pw = require('playwright-core');
+  let browser = null;
+
+  try {
+    browser = await pw.chromium.connectOverCDP(SBR_WS_ENDPOINT, {
+      timeout: 30000,
+    });
+
+    const page = await browser.newPage();
+    try {
+      await page.goto(url, {
+        waitUntil: 'domcontentloaded',
+        timeout: timeoutMs - 10000,
+      });
+
+      // Wait for JS rendering
+      await page.waitForTimeout(5000);
+
+      const html = await page.content();
+      return html;
+    } finally {
+      await page.close().catch(() => {});
+    }
+  } finally {
+    if (browser) {
+      await browser.close().catch(() => {});
+    }
+  }
+}
+
 // --- Error handler -----------------------------------------------------------
 app.use((err, _req, res, _next) => {
   console.error('[unhandled]', err);
@@ -153,4 +294,6 @@ app.use((err, _req, res, _next) => {
 
 app.listen(PORT, () => {
   console.log(`[ayre-scraper-relay] listening on :${PORT}`);
+  console.log(`[ayre-scraper-relay] Web Unlocker: ${BD_API_KEY ? 'configured' : 'NOT configured'}`);
+  console.log(`[ayre-scraper-relay] SBR: ${SBR_WS_ENDPOINT ? 'configured' : 'NOT configured'}`);
 });

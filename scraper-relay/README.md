@@ -16,6 +16,7 @@ egress IP, performs the SBR navigation, and returns normalized JSON.
 | GET    | `/health`           | none                    | Liveness probe (used by Railway healthcheck)         |
 | GET    | `/whoami`           | none                    | Returns the relay's outbound public IP               |
 | POST   | `/scrape/flexmls`   | `Authorization: Bearer` | Scrapes a FlexMLS listing URL and returns property JSON |
+| POST   | `/scrape/url`       | `Authorization: Bearer` | Generic URL fetch via Web Unlocker + SBR fallback      |
 
 ### `POST /scrape/flexmls`
 
@@ -55,6 +56,9 @@ Response:
 | `PORT`               | `3000`                                                                                          | Set by Railway automatically                     |
 | `RELAY_AUTH_TOKEN`   | (baked default for dashboard compatibility)                                                     | Bearer token expected in `Authorization` header  |
 | `SBR_WS_ENDPOINT`    | `wss://brd-customer-hl_ebc27cb0-zone-crexi:m6yo5yksj0py@brd.superproxy.io:9222`                  | Bright Data Scraping Browser WS URL              |
+| `BRIGHTDATA_API_KEY` | (none)                                                                                          | Bright Data Web Unlocker API key                 |
+| `BRIGHTDATA_API_URL` | `https://api.brightdata.com/request`                                                            | Bright Data Web Unlocker API endpoint            |
+| `BRIGHTDATA_ZONE`    | `web_unlocker1`                                                                                 | Bright Data zone name                            |
 
 ## Local dev
 
