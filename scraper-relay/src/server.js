@@ -4,6 +4,7 @@ const express = require('express');
 const morgan = require('morgan');
 const https = require('https');
 const { scrapeFlexMls } = require('./scrapers/flexmls');
+const { scrapeCrexi } = require('./scrapers/crexi');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -39,13 +40,14 @@ app.get('/', (_req, res) => {
   res.json({
     ok: true,
     service: 'ayre-scraper-relay',
-    version: '1.1.0',
+    version: '1.2.0',
     endpoints: [
       '/health',
       '/whoami',
       '/diag/sbr',
       'POST /scrape/flexmls',
       'POST /scrape/url',
+      'POST /scrape/crexi',
     ],
   });
 });
@@ -286,6 +288,69 @@ async function fetchViaSBR(url, timeoutMs) {
   }
 }
 
+// POST /scrape/crexi — Log into Crexi via SBR and extract seller listing metrics.
+//
+// Body: { email, password, timeout_ms? }
+// Response: { ok: true, listings: [{ listingId, title, address, views, inquiries, saves, listingUrl }] }
+//
+// Uses the BRIGHTDATA_SBR_WS_ENDPOINT env var if set, otherwise falls back to
+// the default SBR_WS_ENDPOINT (crexi zone). The crexi zone is already whitelisted
+// for Railway's static IP (162.220.234.15).
+app.post('/scrape/crexi', requireBearer, async (req, res) => {
+  const { email, password, timeout_ms } = req.body || {};
+  if (!email || typeof email !== 'string') {
+    return res.status(400).json({ ok: false, error: 'missing or invalid "email" in body' });
+  }
+  if (!password || typeof password !== 'string') {
+    return res.status(400).json({ ok: false, error: 'missing or invalid "password" in body' });
+  }
+
+  // Allow a dedicated SBR endpoint for Crexi (in case the zone differs)
+  const sbrEndpoint =
+    process.env.BRIGHTDATA_SBR_WS_ENDPOINT ||
+    process.env.SBR_WS_ENDPOINT ||
+    'wss://brd-customer-hl_ebc27cb0-zone-crexi:m6yo5yksj0py@brd.superproxy.io:9222';
+
+  const timeoutMs = Number(timeout_ms) > 0 ? Number(timeout_ms) : 120_000;
+  const started = Date.now();
+
+  try {
+    console.log(`[scrape/crexi] Starting scrape for ${email}`);
+    const listings = await scrapeCrexi({
+      email,
+      password,
+      sbrWsEndpoint: sbrEndpoint,
+      timeoutMs,
+    });
+
+    // If the scraper returned a debug object instead of an array, surface it
+    if (listings && listings.__debug) {
+      console.warn('[scrape/crexi] No listings found — returning debug snapshot');
+      return res.status(200).json({
+        ok: false,
+        error: 'No listings found — page structure may have changed',
+        debug: listings,
+        duration_ms: Date.now() - started,
+      });
+    }
+
+    console.log(`[scrape/crexi] Found ${listings.length} listing(s) in ${Date.now() - started}ms`);
+    return res.json({
+      ok: true,
+      count: listings.length,
+      listings,
+      duration_ms: Date.now() - started,
+    });
+  } catch (err) {
+    console.error('[scrape/crexi] error:', err);
+    return res.status(502).json({
+      ok: false,
+      error: String(err && err.message ? err.message : err),
+      duration_ms: Date.now() - started,
+    });
+  }
+});
+
 // --- Error handler -----------------------------------------------------------
 app.use((err, _req, res, _next) => {
   console.error('[unhandled]', err);
@@ -293,7 +358,7 @@ app.use((err, _req, res, _next) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`[ayre-scraper-relay] listening on :${PORT}`);
+  console.log(`[ayre-scraper-relay] v1.2.0 listening on :${PORT}`);
   console.log(`[ayre-scraper-relay] Web Unlocker: ${BD_API_KEY ? 'configured' : 'NOT configured'}`);
   console.log(`[ayre-scraper-relay] SBR: ${SBR_WS_ENDPOINT ? 'configured' : 'NOT configured'}`);
 });
