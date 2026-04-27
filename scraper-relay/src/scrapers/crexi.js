@@ -201,33 +201,26 @@ async function scrapeCrexi({ email, password, sbrWsEndpoint, timeoutMs = 150_000
         throw new Error(`Could not find email input after clicking Sign In. Inputs: ${JSON.stringify(modalInputs)}, Buttons: ${JSON.stringify(modalButtons.slice(0,10))}`);
       }
 
-      // Fill credentials using JavaScript to bypass Angular's aria-invalid blocking
-      // Playwright's fill() and pressSequentially() both wait for 'editable' state
-      // but Angular's cuiforminput directive marks fields as aria-invalid which blocks this.
-      // Solution: use page.evaluate() with native input value setter + dispatch events
-      const fillAngularInput = async (selector, value) => {
-        await page.evaluate(({ sel, val }) => {
-          const el = document.querySelector(sel);
-          if (!el) throw new Error('Element not found: ' + sel);
-          // Use native input value setter to bypass Angular's value tracking
-          const nativeInputValueSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
-          nativeInputValueSetter.call(el, val);
-          // Dispatch events Angular listens to
-          el.dispatchEvent(new Event('input', { bubbles: true }));
-          el.dispatchEvent(new Event('change', { bubbles: true }));
-          el.dispatchEvent(new Event('blur', { bubbles: true }));
-        }, { sel: selector, val: value });
-      };
+      // Fill credentials using page.keyboard.type() which sends raw CDP key events
+      // This bypasses:
+      // 1. Playwright's editability check (which blocks on aria-invalid fields)
+      // 2. SBR's restriction on page.evaluate() for password fields
+      // We click the field first to focus it, then use page.keyboard.type()
 
-      console.log('[crexi] Filling email via JS');
-      await fillAngularInput('input[type="email"]', email);
-      await page.waitForTimeout(500);
+      console.log('[crexi] Filling email via keyboard');
+      await emailInput.click({ timeout: 5000, force: true });
+      await page.waitForTimeout(300);
+      await page.keyboard.type(email, { delay: 30 });
+      await page.waitForTimeout(300);
 
       const passwordInput = page.locator('input[type="password"]').first();
       await passwordInput.waitFor({ state: 'visible', timeout: 10000 });
-      console.log('[crexi] Filling password via JS');
-      await fillAngularInput('input[type="password"]', password);
-      await page.waitForTimeout(500);
+      console.log('[crexi] Filling password via keyboard');
+      // Use Tab to move to password field (more natural than click for Angular forms)
+      await page.keyboard.press('Tab');
+      await page.waitForTimeout(300);
+      await page.keyboard.type(password, { delay: 30 });
+      await page.waitForTimeout(300);
 
       // Submit
       console.log('[crexi] Submitting login form');
