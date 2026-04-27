@@ -202,13 +202,18 @@ async function scrapeCrexi({ email, password, sbrWsEndpoint, timeoutMs = 150_000
       }
 
       // Fill credentials
+      // Angular forms use custom validation that can mark fields as aria-invalid
+      // which causes fill() to hang waiting for 'editable' state.
+      // Use click + pressSequentially (types char-by-char) to bypass this.
       console.log('[crexi] Filling email');
-      await emailInput.fill(email);
+      await emailInput.click({ timeout: 5000 });
+      await emailInput.pressSequentially(email, { delay: 50 });
 
       const passwordInput = page.locator('input[type="password"]').first();
       await passwordInput.waitFor({ state: 'visible', timeout: 10000 });
       console.log('[crexi] Filling password');
-      await passwordInput.fill(password);
+      await passwordInput.click({ timeout: 5000 });
+      await passwordInput.pressSequentially(password, { delay: 50 });
 
       // Submit
       console.log('[crexi] Submitting login form');
