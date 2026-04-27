@@ -1,24 +1,14 @@
 'use strict';
 /**
- * scrapeCrexi  v1.2.1
+ * scrapeCrexi  v1.2.2
  *
  * Logs into Crexi using Bright Data SBR (Playwright over CDP) and extracts
  * per-listing metrics from the seller's My Listings dashboard.
  *
- * Key findings from live DOM inspection (2026-04-26):
- *  - crexi.com/login returns a 404. Login is a modal opened from the header.
- *  - The modal uses Angular Material (cui-form-field / cuiforminput).
- *    Inputs have NO name/id/formcontrolname — only type and data-cy="textInput".
- *  - Submit button: button[data-cy="button-login"]
- *  - Dashboard uses AG Grid (.ag-pinned-left-cols-container / .ag-center-cols-container)
- *    with col-id attributes: Property, AskingPrice, Status, SearchScore,
- *    NumberOfPageViews, NumberOfVisitors, NumberOfDownloadedDocument,
- *    NumberOfOffers, Actions.
- *
- * Metric mapping:
- *   views     -> NumberOfPageViews
- *   inquiries -> NumberOfOffers  (closest proxy; no "inquiries" column on grid)
- *   saves     -> NumberOfDownloadedDocument (OM/Flyer downloads; no "saves" column)
+ * Strategy:
+ * 1. Navigate directly to /dashboard/my-listings (Crexi redirects to login if not authed)
+ * 2. If redirected to login, fill credentials using multiple selector fallbacks
+ * 3. Extract AG Grid data after successful login
  */
 async function scrapeCrexi({ email, password, sbrWsEndpoint, timeoutMs = 150_000 }) {
   const { chromium } = require('playwright-core');
@@ -38,61 +28,166 @@ async function scrapeCrexi({ email, password, sbrWsEndpoint, timeoutMs = 150_000
     page.setDefaultNavigationTimeout(timeoutMs);
     page.setDefaultTimeout(timeoutMs);
 
-    // 1. Navigate to Crexi home (login modal is triggered from the header)
-    console.log('[crexi] Navigating to https://www.crexi.com/');
-    await page.goto('https://www.crexi.com/', {
-      waitUntil: 'domcontentloaded',
-      timeout: timeoutMs,
-    });
-
-    // 2. Open the Sign-in modal
-    console.log('[crexi] Clicking Sign in header button');
-    await page.locator('button', { hasText: /^Sign in$/i }).first().click({ timeout: 30_000 });
-
-    // 3. Switch to the Log In tab (modal opens on Sign Up by default)
-    console.log('[crexi] Switching to Log In tab');
-    await page.locator('button[role="tab"]', { hasText: /^Log In$/i }).click({ timeout: 20_000 });
-
-    // 4. Fill credentials
-    // Crexi uses Angular Material cui-form-field with bare <input type="email"
-    // data-cy="textInput"> - no name/id/formcontrolname attributes.
-    console.log('[crexi] Filling email');
-    const emailInput = page.locator('input[type="email"][data-cy="textInput"]').first();
-    await emailInput.waitFor({ state: 'visible', timeout: 20_000 });
-    await emailInput.fill(email);
-
-    console.log('[crexi] Filling password');
-    const passwordInput = page.locator('input[type="password"][data-cy="textInput"]').first();
-    await passwordInput.waitFor({ state: 'visible', timeout: 10_000 });
-    await passwordInput.fill(password);
-
-    // 5. Submit
-    console.log('[crexi] Clicking Log In submit button');
-    await page.locator('button[data-cy="button-login"]').first().click({ timeout: 20_000 });
-
-    // 6. Wait for auth to complete
-    // Signal: "Sign in" button disappears OR user-menu button appears
-    console.log('[crexi] Waiting for post-login state');
-    await Promise.race([
-      page.locator('button[hint="User menu"], button[aria-label*="User menu" i]')
-          .first().waitFor({ state: 'visible', timeout: 45_000 }),
-      page.locator('button', { hasText: /^Sign in$/i })
-          .first().waitFor({ state: 'detached', timeout: 45_000 })
-          .catch(function() {}),
-    ]).catch(function() {});
-
-    // Dismiss welcome tour if present
-    await page.locator('button', { hasText: /^Skip tour$/i })
-      .first().click({ timeout: 5_000 }).catch(function() {});
-
-    // 7. Navigate to My Listings dashboard
-    console.log('[crexi] Navigating to /dashboard/my-listings');
+    // Strategy: Navigate directly to dashboard - Crexi will redirect to login if not authed.
+    // This avoids needing to find the "Sign in" button on the homepage.
+    console.log('[crexi] Navigating to /dashboard/my-listings (will redirect to login if needed)');
     await page.goto('https://www.crexi.com/dashboard/my-listings', {
       waitUntil: 'domcontentloaded',
       timeout: timeoutMs,
     });
 
-    // 8. Wait for AG Grid to render
+    // Wait for the page to settle
+    await page.waitForTimeout(3000);
+
+    const currentUrl = page.url();
+    console.log('[crexi] Current URL after navigation:', currentUrl);
+
+    // Check if we're already logged in (on the dashboard)
+    const onDashboard = currentUrl.includes('/dashboard') && !currentUrl.includes('login');
+
+    if (!onDashboard) {
+      // We need to log in. Try multiple approaches.
+      console.log('[crexi] Not on dashboard, attempting login...');
+
+      // Check if there's a login form visible already (some redirect paths show it inline)
+      let emailInput = null;
+
+      // Try approach 1: Direct email/password inputs (no modal needed)
+      try {
+        emailInput = page.locator('input[type="email"]').first();
+        await emailInput.waitFor({ state: 'visible', timeout: 5000 });
+        console.log('[crexi] Found email input directly on page');
+      } catch (_) {
+        emailInput = null;
+      }
+
+      if (!emailInput) {
+        // Try approach 2: Click "Sign in" or "Log In" button to open modal
+        // Try various selectors for the sign-in button
+        const signInSelectors = [
+          'button[data-cy="button-sign-in"]',
+          'button[data-cy="sign-in"]',
+          'a[data-cy="sign-in"]',
+          'button:has-text("Sign in")',
+          'button:has-text("Sign In")',
+          'button:has-text("Log in")',
+          'button:has-text("Log In")',
+          '[class*="sign-in"]',
+          '[class*="login"]',
+          'a[href*="login"]',
+        ];
+
+        let clicked = false;
+        for (const sel of signInSelectors) {
+          try {
+            const el = page.locator(sel).first();
+            await el.waitFor({ state: 'visible', timeout: 3000 });
+            await el.click({ timeout: 5000 });
+            console.log('[crexi] Clicked sign-in element with selector:', sel);
+            clicked = true;
+            await page.waitForTimeout(2000);
+            break;
+          } catch (_) {}
+        }
+
+        if (!clicked) {
+          // Approach 3: Use evaluate to find and click the sign-in button
+          console.log('[crexi] Trying page.evaluate to click sign-in...');
+          await page.evaluate(() => {
+            const buttons = Array.from(document.querySelectorAll('button, a'));
+            const signIn = buttons.find(b => /sign.?in|log.?in/i.test(b.textContent || b.innerText || ''));
+            if (signIn) signIn.click();
+          });
+          await page.waitForTimeout(2000);
+        }
+
+        // Now try to find the email input
+        try {
+          emailInput = page.locator('input[type="email"]').first();
+          await emailInput.waitFor({ state: 'visible', timeout: 10000 });
+          console.log('[crexi] Found email input after clicking sign-in');
+        } catch (_) {
+          // Try the Log In tab if we're on a sign-up modal
+          try {
+            await page.locator('button[role="tab"]:has-text("Log In"), [role="tab"]:has-text("Log In")').first().click({ timeout: 5000 });
+            await page.waitForTimeout(1000);
+            emailInput = page.locator('input[type="email"]').first();
+            await emailInput.waitFor({ state: 'visible', timeout: 10000 });
+            console.log('[crexi] Found email input after switching to Log In tab');
+          } catch (_) {
+            emailInput = null;
+          }
+        }
+      }
+
+      if (!emailInput) {
+        // Capture debug info
+        const title = await page.title().catch(() => 'unknown');
+        const url = page.url();
+        const bodyText = await page.evaluate(() => document.body ? document.body.innerText.slice(0, 1000) : '').catch(() => '');
+        const allInputs = await page.evaluate(() =>
+          Array.from(document.querySelectorAll('input')).map(i => ({
+            type: i.type, name: i.name, id: i.id, placeholder: i.placeholder,
+            dataCy: i.getAttribute('data-cy'), visible: i.offsetParent !== null
+          }))
+        ).catch(() => []);
+        const allButtons = await page.evaluate(() =>
+          Array.from(document.querySelectorAll('button')).slice(0, 20).map(b => ({
+            text: b.innerText.trim().slice(0, 50),
+            dataCy: b.getAttribute('data-cy'),
+            class: b.className.slice(0, 80)
+          }))
+        ).catch(() => []);
+        throw new Error(`Could not find email input. URL: ${url}, Title: ${title}, Body: ${bodyText.slice(0,300)}, Inputs: ${JSON.stringify(allInputs)}, Buttons: ${JSON.stringify(allButtons)}`);
+      }
+
+      // Fill email
+      console.log('[crexi] Filling email');
+      await emailInput.fill(email);
+
+      // Find password input
+      const passwordInput = page.locator('input[type="password"]').first();
+      await passwordInput.waitFor({ state: 'visible', timeout: 10000 });
+      console.log('[crexi] Filling password');
+      await passwordInput.fill(password);
+
+      // Submit - try multiple selectors
+      console.log('[crexi] Submitting login form');
+      let submitted = false;
+      const submitSelectors = [
+        'button[data-cy="button-login"]',
+        'button[type="submit"]',
+        'button:has-text("Log In")',
+        'button:has-text("Sign In")',
+        'button:has-text("Login")',
+      ];
+      for (const sel of submitSelectors) {
+        try {
+          await page.locator(sel).first().click({ timeout: 5000 });
+          console.log('[crexi] Submitted with selector:', sel);
+          submitted = true;
+          break;
+        } catch (_) {}
+      }
+      if (!submitted) {
+        // Try pressing Enter
+        await passwordInput.press('Enter');
+        console.log('[crexi] Submitted by pressing Enter');
+      }
+
+      // Wait for login to complete
+      console.log('[crexi] Waiting for post-login navigation...');
+      await page.waitForTimeout(4000);
+
+      // Navigate to dashboard
+      console.log('[crexi] Navigating to /dashboard/my-listings after login');
+      await page.goto('https://www.crexi.com/dashboard/my-listings', {
+        waitUntil: 'domcontentloaded',
+        timeout: timeoutMs,
+      });
+    }
+
+    // Wait for AG Grid to render
     console.log('[crexi] Waiting for AG Grid rows');
     await page.waitForSelector(
       '.ag-pinned-left-cols-container .ag-row, .ag-center-cols-container .ag-row',
@@ -101,7 +196,7 @@ async function scrapeCrexi({ email, password, sbrWsEndpoint, timeoutMs = 150_000
     // Give the grid a moment to fully populate all metric cells
     await page.waitForTimeout(2500);
 
-    // 9. Extract listings from AG Grid
+    // Extract listings from AG Grid
     console.log('[crexi] Extracting listings from AG Grid');
     const listings = await page.evaluate(function() {
       var cleanWS = function(s) { return (s || '').replace(/\s+/g, ' ').trim(); };
@@ -159,7 +254,6 @@ async function scrapeCrexi({ email, password, sbrWsEndpoint, timeoutMs = 150_000
         var docs = parseCountCell(c.NumberOfDownloadedDocument);
         var offers = parseCountCell(c.NumberOfOffers);
         var priceText = cleanWS((c.AskingPrice || '').replace(/^Asking\s*/i, ''));
-        // Status cell contains dropdown options as text; first line is the actual status
         var statusLine = cleanWS((c.Status || '').split(/\n/)[0]);
         return {
           title: r.title,
