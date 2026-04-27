@@ -40,7 +40,7 @@ app.get('/', (_req, res) => {
   res.json({
     ok: true,
     service: 'ayre-scraper-relay',
-    version: '1.2.8',
+    version: '1.3.0',
     endpoints: [
       '/health',
       '/whoami',
@@ -49,6 +49,7 @@ app.get('/', (_req, res) => {
       'POST /scrape/url',
       'POST /scrape/crexi',
     ],
+    crexi_auth_configured: Boolean(process.env.CREXI_AUTH_TOKEN),
   });
 });
 
@@ -288,54 +289,58 @@ async function fetchViaSBR(url, timeoutMs) {
   }
 }
 
-// POST /scrape/crexi — Log into Crexi via SBR and extract seller listing metrics.
+// POST /scrape/crexi — Pull the broker's listings and metrics from the Crexi API.
 //
-// Body: { email, password, timeout_ms? }
-// Response: { ok: true, listings: [{ listingId, title, address, views, inquiries, saves, listingUrl }] }
+// Body: { crexi_token?, email?, password?, timeout_ms?, sort_order?, count? }
+//   - crexi_token (optional): Bearer token for api.crexi.com. If omitted,
+//     falls back to the CREXI_AUTH_TOKEN env var.
+//   - email/password: accepted for backwards-compat with v1.2.x callers but
+//     are ignored by this handler. Crexi's IDP blocks headless password
+//     typing (KYC required on the SBR zone), so we use an API token issued
+//     by a real browser session instead. Tokens last ~45 days.
 //
-// Uses the BRIGHTDATA_SBR_WS_ENDPOINT env var if set, otherwise falls back to
-// the default SBR_WS_ENDPOINT (crexi zone). The crexi zone is already whitelisted
-// for Railway's static IP (162.220.234.15).
+// Response:
+//   { ok: true,
+//     count: <n>,
+//     listings: [
+//       { listingId, title, address, views, inquiries, saves,
+//         status, askingPrice, searchScore, listingUrl,
+//         location: {...}, stats: {...} }
+//     ],
+//     duration_ms }
+//
+// Implementation notes:
+//   * Uses the Crexi internal endpoint GET /assets/sell-list.
+//   * The request is routed through Bright Data Web Unlocker (zone
+//     `web_unlocker1`) because the Railway outbound IP is challenged by
+//     Cloudflare when hitting api.crexi.com directly.
+//   * Railway's static outbound IP (162.220.234.15) is already whitelisted
+//     in both the SBR `crexi` zone and the Web Unlocker zone.
 app.post('/scrape/crexi', requireBearer, async (req, res) => {
-  const { email, password, timeout_ms, debug } = req.body || {};
-  if (!email || typeof email !== 'string') {
-    return res.status(400).json({ ok: false, error: 'missing or invalid "email" in body' });
-  }
-  if (!password || typeof password !== 'string') {
-    return res.status(400).json({ ok: false, error: 'missing or invalid "password" in body' });
+  const { crexi_token, timeout_ms, sort_order, sort_direction, count } = req.body || {};
+  const crexiToken = (crexi_token && String(crexi_token)) || process.env.CREXI_AUTH_TOKEN || '';
+
+  if (!crexiToken) {
+    return res.status(400).json({
+      ok: false,
+      error: 'Missing Crexi bearer token. Provide `crexi_token` in the body or set the CREXI_AUTH_TOKEN env var on Railway.',
+    });
   }
 
-  // Allow a dedicated SBR endpoint for Crexi (in case the zone differs)
-  const sbrEndpoint =
-    process.env.BRIGHTDATA_SBR_WS_ENDPOINT ||
-    process.env.SBR_WS_ENDPOINT ||
-    'wss://brd-customer-hl_ebc27cb0-zone-crexi:m6yo5yksj0py@brd.superproxy.io:9222';
-
-  const timeoutMs = Number(timeout_ms) > 0 ? Number(timeout_ms) : 120_000;
+  const timeoutMs = Number(timeout_ms) > 0 ? Number(timeout_ms) : 60_000;
   const started = Date.now();
 
   try {
-    console.log(`[scrape/crexi] Starting scrape for ${email}`);
+    console.log('[scrape/crexi] Fetching via Crexi API + Web Unlocker');
     const listings = await scrapeCrexi({
-      email,
-      password,
-      sbrWsEndpoint: sbrEndpoint,
+      crexiToken,
       timeoutMs,
-      debug: Boolean(debug),
+      sortOrder: typeof sort_order === 'string' ? sort_order : undefined,
+      sortDirection: typeof sort_direction === 'string' ? sort_direction : undefined,
+      count: Number.isFinite(Number(count)) && Number(count) > 0 ? Number(count) : undefined,
     });
 
-    // If the scraper returned a debug object instead of an array, surface it
-    if (listings && listings.__debug) {
-      console.warn('[scrape/crexi] No listings found — returning debug snapshot');
-      return res.status(200).json({
-        ok: false,
-        error: 'No listings found — page structure may have changed',
-        debug: listings,
-        duration_ms: Date.now() - started,
-      });
-    }
-
-    console.log(`[scrape/crexi] Found ${listings.length} listing(s) in ${Date.now() - started}ms`);
+    console.log(`[scrape/crexi] Returned ${listings.length} listing(s) in ${Date.now() - started}ms`);
     return res.json({
       ok: true,
       count: listings.length,
@@ -359,7 +364,8 @@ app.use((err, _req, res, _next) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`[ayre-scraper-relay] v1.2.8 listening on :${PORT}`);
+  console.log(`[ayre-scraper-relay] v1.3.0 listening on :${PORT}`);
+  console.log(`[ayre-scraper-relay] CREXI_AUTH_TOKEN: ${process.env.CREXI_AUTH_TOKEN ? 'configured' : 'NOT configured'}`);
   console.log(`[ayre-scraper-relay] Web Unlocker: ${BD_API_KEY ? 'configured' : 'NOT configured'}`);
   console.log(`[ayre-scraper-relay] SBR: ${SBR_WS_ENDPOINT ? 'configured' : 'NOT configured'}`);
 });
