@@ -1,16 +1,14 @@
 'use strict';
 /**
- * scrapeCrexi  v1.2.4
+ * scrapeCrexi  v1.2.5
  *
  * Logs into Crexi using Bright Data SBR (Playwright over CDP) and extracts
  * per-listing metrics from the seller's My Listings dashboard.
  *
- * Key fix in v1.2.4:
- * - Crexi is an Angular SPA. Using waitUntil:'domcontentloaded' fires before
- *   Angular bootstraps and renders any content. Must use 'networkidle' or
- *   wait for specific Angular-rendered elements.
- * - Navigate to crexi.com/ first, wait for Angular to render the header,
- *   then click Sign In to open the login modal.
+ * Key fixes in v1.2.5:
+ * - Use waitUntil:'load' (not 'networkidle' which times out, not 'domcontentloaded' which is too early)
+ * - Wait for Angular to bootstrap with a longer timeout (30s)
+ * - Better debug output including HTML snapshot
  */
 async function scrapeCrexi({ email, password, sbrWsEndpoint, timeoutMs = 150_000, debug = false }) {
   const { chromium } = require('playwright-core');
@@ -30,108 +28,141 @@ async function scrapeCrexi({ email, password, sbrWsEndpoint, timeoutMs = 150_000
     page.setDefaultNavigationTimeout(timeoutMs);
     page.setDefaultTimeout(timeoutMs);
 
-    // Step 1: Navigate to Crexi homepage and wait for Angular to bootstrap
+    // Step 1: Navigate to Crexi homepage
+    // Use 'load' (not 'networkidle' which times out on Crexi, not 'domcontentloaded' which is too early)
     console.log('[crexi] Navigating to https://www.crexi.com/');
     await page.goto('https://www.crexi.com/', {
-      waitUntil: 'networkidle',
-      timeout: 90_000,
+      waitUntil: 'load',
+      timeout: 60_000,
     });
 
-    console.log('[crexi] Waiting for Angular app to render...');
-    // Wait for the Angular app to render - look for the header nav or any button
-    // Angular apps render a <app-root> or similar component
-    // Try multiple signals that Angular has bootstrapped
+    console.log('[crexi] Page load event fired, waiting for Angular to bootstrap...');
+    // Angular SPA needs time to bootstrap after the load event
+    // Wait for any button to appear (sign-in button, nav buttons, etc.)
     let appReady = false;
-    const angularSignals = [
-      'header button',
-      'nav button',
-      'button',
-      'app-root',
-      'crx-header',
-      '[class*="header"]',
-      'mat-toolbar',
-    ];
-    for (const sel of angularSignals) {
-      try {
-        await page.waitForSelector(sel, { timeout: 15000 });
-        console.log('[crexi] Angular rendered, found:', sel);
-        appReady = true;
-        break;
-      } catch (_) {}
+    try {
+      await page.waitForSelector('button', { timeout: 30000 });
+      appReady = true;
+      console.log('[crexi] Angular bootstrapped - found button elements');
+    } catch (_) {
+      console.log('[crexi] No buttons found after 30s - checking page state');
+    }
+
+    // Capture current state for debugging
+    const homeUrl = page.url();
+    const homeTitle = await page.title().catch(() => 'unknown');
+    const homeBodyText = await page.evaluate(() => document.body ? document.body.innerText.slice(0, 300) : '').catch(() => '');
+    const homeButtons = await page.evaluate(() =>
+      Array.from(document.querySelectorAll('button')).slice(0, 10).map(b => ({
+        text: b.innerText.trim().slice(0, 50),
+        dataCy: b.getAttribute('data-cy'),
+        visible: b.offsetParent !== null
+      }))
+    ).catch(() => []);
+    const homeInputs = await page.evaluate(() =>
+      Array.from(document.querySelectorAll('input')).map(i => ({
+        type: i.type, name: i.name, placeholder: i.placeholder, visible: i.offsetParent !== null
+      }))
+    ).catch(() => []);
+
+    console.log('[crexi] Homepage state:', JSON.stringify({ url: homeUrl, title: homeTitle, bodyText: homeBodyText.slice(0,100), buttonCount: homeButtons.length, inputCount: homeInputs.length }));
+
+    if (debug && !appReady) {
+      const html = await page.content().catch(() => '');
+      return { __debug: true, url: homeUrl, title: homeTitle, bodyText: homeBodyText, buttons: homeButtons, inputs: homeInputs, html: html.slice(0, 8000), stage: 'homepage_no_buttons' };
     }
 
     if (!appReady) {
-      // Capture debug info
-      const title = await page.title().catch(() => 'unknown');
-      const url = page.url();
-      const bodyText = await page.evaluate(() => document.body ? document.body.innerText.slice(0, 500) : '').catch(() => '');
-      const html = debug ? await page.content().catch(() => '') : '';
-      if (debug) {
-        return { __debug: true, url, title, bodyText, html: html.slice(0, 5000), stage: 'angular_bootstrap' };
-      }
-      throw new Error(`Angular app did not render. URL: ${url}, Title: ${title}, Body: ${bodyText.slice(0,200)}`);
+      // Try waiting longer
+      await page.waitForTimeout(5000);
+      const btns = await page.evaluate(() => document.querySelectorAll('button').length).catch(() => 0);
+      console.log('[crexi] After extra wait, button count:', btns);
     }
 
-    // Give Angular a moment to fully render
-    await page.waitForTimeout(2000);
-
     // Step 2: Check if we're already logged in
-    const isLoggedIn = await page.evaluate(() => {
-      // Check for user menu button or avatar (indicates logged in state)
-      const userMenu = document.querySelector('[hint="User menu"], [aria-label*="User menu" i], [class*="user-menu"], [class*="avatar"]');
-      // Also check if Sign in button is absent
-      const signIn = Array.from(document.querySelectorAll('button')).find(b => /^sign.?in$/i.test(b.innerText.trim()));
-      return { hasUserMenu: Boolean(userMenu), hasSignIn: Boolean(signIn) };
-    }).catch(() => ({ hasUserMenu: false, hasSignIn: true }));
+    const loginState = await page.evaluate(() => {
+      const buttons = Array.from(document.querySelectorAll('button'));
+      const signInBtn = buttons.find(b => /^sign.?in$/i.test(b.innerText.trim()));
+      const userMenuBtn = document.querySelector('[hint="User menu"], [aria-label*="User menu" i], [class*="user-avatar"], [class*="userAvatar"]');
+      return {
+        hasSignIn: Boolean(signInBtn),
+        signInText: signInBtn ? signInBtn.innerText.trim() : null,
+        hasUserMenu: Boolean(userMenuBtn),
+        allButtonTexts: buttons.slice(0, 10).map(b => b.innerText.trim().slice(0, 30)),
+      };
+    }).catch(() => ({ hasSignIn: false, hasUserMenu: false, allButtonTexts: [] }));
 
-    console.log('[crexi] Login state check:', JSON.stringify(isLoggedIn));
+    console.log('[crexi] Login state:', JSON.stringify(loginState));
 
-    if (!isLoggedIn.hasUserMenu) {
+    if (!loginState.hasUserMenu) {
       // Need to log in
       console.log('[crexi] Not logged in, opening Sign In modal...');
 
       // Find and click the Sign In button
       let signInClicked = false;
-      const signInSelectors = [
-        'button:has-text("Sign in")',
-        'button:has-text("Sign In")',
-        'button:has-text("Log in")',
-        'button:has-text("Log In")',
-        '[data-cy*="sign-in"]',
-        '[data-cy*="signin"]',
-      ];
 
-      for (const sel of signInSelectors) {
+      // Try by button text
+      if (loginState.hasSignIn) {
         try {
-          const el = page.locator(sel).first();
-          await el.waitFor({ state: 'visible', timeout: 5000 });
-          await el.click({ timeout: 5000 });
-          console.log('[crexi] Clicked Sign In with selector:', sel);
+          await page.locator('button', { hasText: /^sign.?in$/i }).first().click({ timeout: 5000 });
+          console.log('[crexi] Clicked Sign In button by text');
           signInClicked = true;
-          await page.waitForTimeout(1500);
-          break;
+          await page.waitForTimeout(2000);
         } catch (_) {}
       }
 
       if (!signInClicked) {
-        // Try evaluate-based click
-        const clicked = await page.evaluate(() => {
-          const buttons = Array.from(document.querySelectorAll('button'));
-          const signIn = buttons.find(b => /sign.?in|log.?in/i.test(b.innerText.trim()));
-          if (signIn) { signIn.click(); return true; }
-          return false;
-        }).catch(() => false);
-        if (clicked) {
-          console.log('[crexi] Clicked Sign In via evaluate');
-          await page.waitForTimeout(1500);
+        // Try various selectors
+        const signInSelectors = [
+          'button:has-text("Sign in")',
+          'button:has-text("Sign In")',
+          'button:has-text("Log in")',
+          'button:has-text("Log In")',
+          '[data-cy*="sign-in"]',
+          '[data-cy*="signin"]',
+          'a[href*="login"]',
+        ];
+        for (const sel of signInSelectors) {
+          try {
+            const el = page.locator(sel).first();
+            await el.waitFor({ state: 'visible', timeout: 3000 });
+            await el.click({ timeout: 5000 });
+            console.log('[crexi] Clicked Sign In with selector:', sel);
+            signInClicked = true;
+            await page.waitForTimeout(2000);
+            break;
+          } catch (_) {}
         }
       }
 
-      // Wait for the modal to appear
-      console.log('[crexi] Waiting for login modal...');
+      if (!signInClicked) {
+        // Evaluate-based click
+        const clicked = await page.evaluate(() => {
+          const buttons = Array.from(document.querySelectorAll('button'));
+          const signIn = buttons.find(b => /sign.?in|log.?in/i.test(b.innerText.trim()));
+          if (signIn) { signIn.click(); return signIn.innerText.trim(); }
+          return null;
+        }).catch(() => null);
+        if (clicked) {
+          console.log('[crexi] Clicked Sign In via evaluate, text:', clicked);
+          await page.waitForTimeout(2000);
+          signInClicked = true;
+        }
+      }
+
+      if (!signInClicked) {
+        if (debug) {
+          const html = await page.content().catch(() => '');
+          return { __debug: true, url: homeUrl, title: homeTitle, bodyText: homeBodyText, buttons: homeButtons, inputs: homeInputs, html: html.slice(0, 8000), stage: 'sign_in_not_clicked', loginState };
+        }
+        throw new Error(`Could not find Sign In button. URL: ${homeUrl}, Buttons: ${JSON.stringify(loginState.allButtonTexts)}`);
+      }
+
+      // Wait for the login modal
+      console.log('[crexi] Waiting for login modal email input...');
       let emailInput = null;
 
-      // Try to find email input (may need to switch to Log In tab first)
+      // Try to find email input
       try {
         emailInput = page.locator('input[type="email"]').first();
         await emailInput.waitFor({ state: 'visible', timeout: 10000 });
@@ -150,28 +181,24 @@ async function scrapeCrexi({ email, password, sbrWsEndpoint, timeoutMs = 150_000
       }
 
       if (!emailInput) {
-        // Capture debug info
-        const title = await page.title().catch(() => 'unknown');
-        const url = page.url();
-        const bodyText = await page.evaluate(() => document.body ? document.body.innerText.slice(0, 1000) : '').catch(() => '');
-        const allInputs = await page.evaluate(() =>
+        const modalInputs = await page.evaluate(() =>
           Array.from(document.querySelectorAll('input')).map(i => ({
-            type: i.type, name: i.name, id: i.id, placeholder: i.placeholder,
+            type: i.type, name: i.name, placeholder: i.placeholder,
             dataCy: i.getAttribute('data-cy'), visible: i.offsetParent !== null
           }))
         ).catch(() => []);
-        const allButtons = await page.evaluate(() =>
+        const modalButtons = await page.evaluate(() =>
           Array.from(document.querySelectorAll('button')).slice(0, 20).map(b => ({
             text: b.innerText.trim().slice(0, 50),
             dataCy: b.getAttribute('data-cy'),
-            class: b.className.slice(0, 60)
+            role: b.getAttribute('role')
           }))
         ).catch(() => []);
-        const html = debug ? await page.content().catch(() => '') : '';
         if (debug) {
-          return { __debug: true, url, title, bodyText, allInputs, allButtons, html: html.slice(0, 5000), stage: 'find_email_input' };
+          const html = await page.content().catch(() => '');
+          return { __debug: true, url: page.url(), bodyText: await page.evaluate(() => document.body.innerText.slice(0,500)).catch(()=>''), inputs: modalInputs, buttons: modalButtons, html: html.slice(0, 8000), stage: 'modal_no_email_input' };
         }
-        throw new Error(`Could not find email input. URL: ${url}, Inputs: ${JSON.stringify(allInputs)}, Buttons: ${JSON.stringify(allButtons.slice(0,10))}`);
+        throw new Error(`Could not find email input after clicking Sign In. Inputs: ${JSON.stringify(modalInputs)}, Buttons: ${JSON.stringify(modalButtons.slice(0,10))}`);
       }
 
       // Fill credentials
@@ -207,10 +234,10 @@ async function scrapeCrexi({ email, password, sbrWsEndpoint, timeoutMs = 150_000
     // Step 3: Navigate to the My Listings dashboard
     console.log('[crexi] Navigating to /dashboard/my-listings');
     await page.goto('https://www.crexi.com/dashboard/my-listings', {
-      waitUntil: 'networkidle',
-      timeout: 90_000,
+      waitUntil: 'load',
+      timeout: 60_000,
     });
-    await page.waitForTimeout(3000);
+    await page.waitForTimeout(5000);
 
     const dashUrl = page.url();
     console.log('[crexi] Dashboard URL:', dashUrl);
@@ -227,7 +254,7 @@ async function scrapeCrexi({ email, password, sbrWsEndpoint, timeoutMs = 150_000
     let gridFound = false;
     for (const sel of gridSelectors) {
       try {
-        await page.waitForSelector(sel, { timeout: 20000 });
+        await page.waitForSelector(sel, { timeout: 30000 });
         console.log('[crexi] Found grid with selector:', sel);
         gridFound = true;
         break;

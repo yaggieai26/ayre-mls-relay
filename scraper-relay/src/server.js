@@ -40,7 +40,7 @@ app.get('/', (_req, res) => {
   res.json({
     ok: true,
     service: 'ayre-scraper-relay',
-    version: '1.2.4',
+    version: '1.2.5',
     endpoints: [
       '/health',
       '/whoami',
@@ -359,7 +359,7 @@ app.use((err, _req, res, _next) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`[ayre-scraper-relay] v1.2.4 listening on :${PORT}`);
+  console.log(`[ayre-scraper-relay] v1.2.5 listening on :${PORT}`);
   console.log(`[ayre-scraper-relay] Web Unlocker: ${BD_API_KEY ? 'configured' : 'NOT configured'}`);
   console.log(`[ayre-scraper-relay] SBR: ${SBR_WS_ENDPOINT ? 'configured' : 'NOT configured'}`);
 });
