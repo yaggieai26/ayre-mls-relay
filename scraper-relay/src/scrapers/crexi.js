@@ -49,13 +49,13 @@ async function fetchViaWebUnlocker(targetUrl, crexiToken, timeoutMs) {
         url: targetUrl,
         format: 'raw',
         method: 'GET',
-        headers: [
-          { name: 'Authorization', value: `Bearer ${crexiToken}` },
-          { name: 'accept', value: 'application/json, text/plain, */*' },
-          { name: 'origin', value: 'https://www.crexi.com' },
-          { name: 'referer', value: 'https://www.crexi.com/' },
-          { name: 'accept-language', value: 'en-US,en;q=0.9' },
-        ],
+        headers: {
+          Authorization: `Bearer ${crexiToken}`,
+          accept: 'application/json, text/plain, */*',
+          origin: 'https://www.crexi.com',
+          referer: 'https://www.crexi.com/',
+          'accept-language': 'en-US,en;q=0.9',
+        },
       }),
       signal: controller.signal,
     });
