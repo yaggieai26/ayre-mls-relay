@@ -201,19 +201,33 @@ async function scrapeCrexi({ email, password, sbrWsEndpoint, timeoutMs = 150_000
         throw new Error(`Could not find email input after clicking Sign In. Inputs: ${JSON.stringify(modalInputs)}, Buttons: ${JSON.stringify(modalButtons.slice(0,10))}`);
       }
 
-      // Fill credentials
-      // Angular forms use custom validation that can mark fields as aria-invalid
-      // which causes fill() to hang waiting for 'editable' state.
-      // Use click + pressSequentially (types char-by-char) to bypass this.
-      console.log('[crexi] Filling email');
-      await emailInput.click({ timeout: 5000 });
-      await emailInput.pressSequentially(email, { delay: 50 });
+      // Fill credentials using JavaScript to bypass Angular's aria-invalid blocking
+      // Playwright's fill() and pressSequentially() both wait for 'editable' state
+      // but Angular's cuiforminput directive marks fields as aria-invalid which blocks this.
+      // Solution: use page.evaluate() with native input value setter + dispatch events
+      const fillAngularInput = async (selector, value) => {
+        await page.evaluate(({ sel, val }) => {
+          const el = document.querySelector(sel);
+          if (!el) throw new Error('Element not found: ' + sel);
+          // Use native input value setter to bypass Angular's value tracking
+          const nativeInputValueSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+          nativeInputValueSetter.call(el, val);
+          // Dispatch events Angular listens to
+          el.dispatchEvent(new Event('input', { bubbles: true }));
+          el.dispatchEvent(new Event('change', { bubbles: true }));
+          el.dispatchEvent(new Event('blur', { bubbles: true }));
+        }, { sel: selector, val: value });
+      };
+
+      console.log('[crexi] Filling email via JS');
+      await fillAngularInput('input[type="email"]', email);
+      await page.waitForTimeout(500);
 
       const passwordInput = page.locator('input[type="password"]').first();
       await passwordInput.waitFor({ state: 'visible', timeout: 10000 });
-      console.log('[crexi] Filling password');
-      await passwordInput.click({ timeout: 5000 });
-      await passwordInput.pressSequentially(password, { delay: 50 });
+      console.log('[crexi] Filling password via JS');
+      await fillAngularInput('input[type="password"]', password);
+      await page.waitForTimeout(500);
 
       // Submit
       console.log('[crexi] Submitting login form');
