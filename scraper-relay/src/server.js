@@ -40,7 +40,7 @@ app.get('/', (_req, res) => {
   res.json({
     ok: true,
     service: 'ayre-scraper-relay',
-    version: '1.2.2',
+    version: '1.2.3',
     endpoints: [
       '/health',
       '/whoami',
@@ -297,7 +297,7 @@ async function fetchViaSBR(url, timeoutMs) {
 // the default SBR_WS_ENDPOINT (crexi zone). The crexi zone is already whitelisted
 // for Railway's static IP (162.220.234.15).
 app.post('/scrape/crexi', requireBearer, async (req, res) => {
-  const { email, password, timeout_ms } = req.body || {};
+  const { email, password, timeout_ms, debug } = req.body || {};
   if (!email || typeof email !== 'string') {
     return res.status(400).json({ ok: false, error: 'missing or invalid "email" in body' });
   }
@@ -321,6 +321,7 @@ app.post('/scrape/crexi', requireBearer, async (req, res) => {
       password,
       sbrWsEndpoint: sbrEndpoint,
       timeoutMs,
+      debug: Boolean(debug),
     });
 
     // If the scraper returned a debug object instead of an array, surface it
@@ -358,7 +359,7 @@ app.use((err, _req, res, _next) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`[ayre-scraper-relay] v1.2.2 listening on :${PORT}`);
+  console.log(`[ayre-scraper-relay] v1.2.3 listening on :${PORT}`);
   console.log(`[ayre-scraper-relay] Web Unlocker: ${BD_API_KEY ? 'configured' : 'NOT configured'}`);
   console.log(`[ayre-scraper-relay] SBR: ${SBR_WS_ENDPOINT ? 'configured' : 'NOT configured'}`);
 });
