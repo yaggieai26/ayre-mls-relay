@@ -5,6 +5,7 @@ const morgan = require('morgan');
 const https = require('https');
 const { scrapeFlexMls } = require('./scrapers/flexmls');
 const { scrapeCrexi } = require('./scrapers/crexi');
+const { scrapeHomesDashboard } = require('./scrapers/homesCom');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -40,7 +41,7 @@ app.get('/', (_req, res) => {
   res.json({
     ok: true,
     service: 'ayre-scraper-relay',
-    version: '1.3.1',
+    version: '1.4.0',
     endpoints: [
       '/health',
       '/whoami',
@@ -48,8 +49,10 @@ app.get('/', (_req, res) => {
       'POST /scrape/flexmls',
       'POST /scrape/url',
       'POST /scrape/crexi',
+      'POST /scrape/homes-dashboard',
     ],
     crexi_auth_configured: Boolean(process.env.CREXI_AUTH_TOKEN),
+    homes_auth_configured: Boolean(process.env.HOMES_COM_EMAIL),
   });
 });
 
@@ -357,6 +360,54 @@ app.post('/scrape/crexi', requireBearer, async (req, res) => {
   }
 });
 
+// POST /scrape/homes-dashboard — Log into Homes.com agent dashboard and return all listing analytics.
+//
+// Body: { email?, password?, timeout_ms? }
+//   - email/password: Homes.com agent credentials. Falls back to HOMES_COM_EMAIL / HOMES_COM_PASSWORD env vars.
+//
+// Response:
+//   { ok: true, count: <n>, listings: [{ address, views, saves, inquiries, isLive }], duration_ms }
+app.post('/scrape/homes-dashboard', requireBearer, async (req, res) => {
+  const { email, password, timeout_ms } = req.body || {};
+  const homesEmail = (email && String(email)) || process.env.HOMES_COM_EMAIL || '';
+  const homesPassword = (password && String(password)) || process.env.HOMES_COM_PASSWORD || '';
+
+  if (!homesEmail || !homesPassword) {
+    return res.status(400).json({
+      ok: false,
+      error: 'Missing Homes.com credentials. Provide email/password in the body or set HOMES_COM_EMAIL / HOMES_COM_PASSWORD env vars.',
+    });
+  }
+
+  const timeoutMs = Number(timeout_ms) > 0 ? Number(timeout_ms) : 120_000;
+  const started = Date.now();
+
+  try {
+    console.log('[scrape/homes-dashboard] Logging into Homes.com agent dashboard via SBR');
+    const listings = await scrapeHomesDashboard({
+      email: homesEmail,
+      password: homesPassword,
+      sbrWsEndpoint: SBR_WS_ENDPOINT,
+      timeoutMs,
+    });
+
+    console.log(`[scrape/homes-dashboard] Returned ${listings.length} listing(s) in ${Date.now() - started}ms`);
+    return res.json({
+      ok: true,
+      count: listings.length,
+      listings,
+      duration_ms: Date.now() - started,
+    });
+  } catch (err) {
+    console.error('[scrape/homes-dashboard] error:', err);
+    return res.status(502).json({
+      ok: false,
+      error: String(err && err.message ? err.message : err),
+      duration_ms: Date.now() - started,
+    });
+  }
+});
+
 // --- Error handler -----------------------------------------------------------
 app.use((err, _req, res, _next) => {
   console.error('[unhandled]', err);
@@ -364,8 +415,9 @@ app.use((err, _req, res, _next) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`[ayre-scraper-relay] v1.3.1 listening on :${PORT}`);
+  console.log(`[ayre-scraper-relay] v1.4.0 listening on :${PORT}`);
   console.log(`[ayre-scraper-relay] CREXI_AUTH_TOKEN: ${process.env.CREXI_AUTH_TOKEN ? 'configured' : 'NOT configured'}`);
+  console.log(`[ayre-scraper-relay] HOMES_COM_EMAIL: ${process.env.HOMES_COM_EMAIL ? 'configured' : 'NOT configured'}`);
   console.log(`[ayre-scraper-relay] Web Unlocker: ${BD_API_KEY ? 'configured' : 'NOT configured'}`);
   console.log(`[ayre-scraper-relay] SBR: ${SBR_WS_ENDPOINT ? 'configured' : 'NOT configured'}`);
 });
