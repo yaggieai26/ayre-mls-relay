@@ -288,4 +288,4 @@ async function extractListingsFromPage(page, log) {
   });
 }
 
-module.exports = { scrapeHomesCom };
+module.exports = { scrapeHomesDashboard: scrapeHomesCom, scrapeHomesCom };
